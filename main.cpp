@@ -30,7 +30,6 @@ bool createVideo(VideoCapture cap, VideoWriter& writer, string nameF, bool isRes
 }
 
 #pragma endregion
-
 #pragma region Image process
 double computeMedian(Mat channel) {
     double median = 0.0;
@@ -113,6 +112,42 @@ void dilateImg(Mat& inpImg, bool isErode = true) {
 }
 #pragma endregion
 
+#pragma region Function
+Rect CalAreaInterest(Mat binImg) {
+    vector<vector<Point> > contours;
+    vector<Vec4i> hierarchy;
+    // Horasion
+    int maxContidG;
+    float sumArG = 0;
+    // Car
+    int maxContidC;
+    float sumArC = 0;
+    findContours(binImg, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE);
+    for (size_t i = 0; i < contours.size(); i++)
+    {
+        cv::Moments M = cv::moments(contours[i]);
+        double newArea = cv::contourArea(contours[i]);
+        if (M.m01 / M.m00 < binImg.rows / 2) {
+            if (newArea > sumArG) {
+                sumArG = newArea;
+                maxContidG = i;
+            }
+        }
+        else {
+            if (newArea > sumArC) {
+                sumArC = newArea;
+                maxContidC = i;
+            }
+        }
+    }
+
+    auto horasionR = boundingRect(contours.at(maxContidG));
+    //Point center_horasionR = (horasionR.br() + horasionR.tl()) * 0.5;
+    Point center_horasionR = horasionR.br();
+    auto carR = boundingRect(contours.at(maxContidC));
+    return  Rect (0, center_horasionR.y, binImg.cols, (carR.y - center_horasionR.y));
+}
+#pragma endregion
 #pragma region Tasks
 int Task_2(std::ofstream& logs, bool isLine = false, bool isResize = false, bool isWrite = true) {
     namedWindow("Input image", WINDOW_AUTOSIZE);
@@ -229,8 +264,8 @@ int Task_2(std::ofstream& logs, bool isLine = false, bool isResize = false, bool
     writer.release();
     destroyAllWindows();
 }
-int Task_3(bool isWrite = true) {
-    namedWindow("In image", WINDOW_AUTOSIZE);
+int Task_3(bool isWrite = true, bool isMedian = false, int countFM = 30) {
+    namedWindow("Input image", WINDOW_AUTOSIZE);
 
     VideoCapture cap; VideoWriter writer;
     cap.open("C:/Users/ilyah/Desktop/IS_RTK/Video/20180305_1337_Cam_1_07_00 Part.mp4");
@@ -245,13 +280,17 @@ int Task_3(bool isWrite = true) {
 
     Mat frame;
     int frame_count = 0;
-    double total_time = 0;
+    int frame_row = 0;
+    double total_Y1 = 0;
+    double total_Y2 = 0;
+    Rect area;
 
     for (;;)
     {
         cap >> frame;
         if (frame.empty())
             break;
+        frame_row = frame.cols;
 
         Mat imgProc = frame.clone();
         cv::cvtColor(imgProc, imgProc, cv::COLOR_BGR2GRAY);
@@ -259,47 +298,23 @@ int Task_3(bool isWrite = true) {
         Mat edges = autoCanny(imgProc);
         dilateImg(edges, false);
 
-        // calculate rect 
-        vector<vector<Point> > contours;
-        vector<Vec4i> hierarchy;
-        // Horasion
-        int maxContidG;
-        float sumArG = 0;
-        // Car
-        int maxContidC;
-        float sumArC = 0;
-        findContours(edges, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE);
-        for (size_t i = 0; i < contours.size(); i++)
-        {
-            //drawContours(frame, contours, (int)i, Scalar(255, 0, 0), 2, LINE_8, hierarchy, 0);
-            cv::Moments M = cv::moments(contours[i]);
-            double newArea = cv::contourArea(contours[i]);
-            if (M.m01 / M.m00 < frame.rows / 2) {
-                if (newArea > sumArG) {
-                    sumArG = newArea;
-                    maxContidG = i;
-                }
-            }
-            else {
-                if (newArea > sumArC) {
-                    sumArC = newArea;
-                    maxContidC = i;
-                }
-            }
+        if ((frame_count < countFM && isMedian) || !isMedian) {
+            area = CalAreaInterest(edges);
+            total_Y1 += area.y;
+            total_Y2 += area.y + area.height;
         }
-
-        auto horasionR = boundingRect(contours.at(maxContidG));
-        Point center_horasionR = (horasionR.br() + horasionR.tl()) * 0.5;
-        auto carR = boundingRect(contours.at(maxContidC));
-
-        Rect outRect(0, center_horasionR.y, frame.cols, (carR.y - center_horasionR.y));
-        cv::rectangle(frame, outRect, Scalar(0, 0, 255), 3);
+        else if (isMedian && frame_count == countFM) {
+            area = Rect(0, (int)(total_Y1 / frame_count), frame_row, (int)((int)(total_Y2 / frame_count) - (int)(total_Y1 / frame_count)));
+            std::cout << "Расчитанная координата верхнего левого угла области интереса (" << area.x << ", " << area.y << ")" << endl;
+            std::cout << "Расчитанная координата нижнего правого угла области интереса (" << area.x + area.width << ", " << area.height + area.y << ")" << endl;
+        }
+        cv::rectangle(frame, area, Scalar(0, 0, 255), 3);
 
         // Запись кадра в видеофайл
         if (isWrite && writer.isOpened()) writer.write(frame);
 
         //imshow("canny", edges);
-        imshow("In image", frame);
+        imshow("Input image", frame);
         if (waitKey(1) == 27) break; // ESC для выхода
 
         frame_count++;
@@ -311,32 +326,33 @@ int Task_3(bool isWrite = true) {
         imgProc.release();
     }
 
-    setlocale(LC_ALL, "Russian");
     // Вывод статистики
-    cout << "Общее количество кадров в файле: " << frame_count << endl;
-    cout << "Среднее время обработки кадра : " << total_time / frame_count << " ms" << endl;
-    //! запись в файл
+    if (!isMedian) 
+    {
+        std::cout << "Средняя координата верхнего левого угла области интереса (" << 0 << ", " << (int)(total_Y1 / frame_count) << ")" << endl;
+        std::cout << "Средняя координата нижнего правого угла области интереса (" << frame_row << ", " << (int)(total_Y2 / frame_count) << ")" << endl;
+    }
 
     // clear
     cap.release();
     writer.release();
-    destroyAllWindows();
+    cv::destroyAllWindows();
 }
 #pragma endregion
 
 int main()
 {
+    setlocale(LC_ALL, "Russian");
+
+    Task_3(true, true);
+    return 0;
+}
+
+void Logs()
+{
     std::ofstream logs;
     logs.open("report.txt");
     cout << logs.is_open() << endl;
-
-    // size in == out
-    Task_2(logs, true, false, true);
-    cout << "////////////////////////////////////////////////////////////////" << endl;
     logs << "////////////////////////////////////////////////////////////////" << "\n";
-    // size in / 4 == out
-    Task_2(logs, true, true, true);
-
     logs.close();
-    return 0;
 }
