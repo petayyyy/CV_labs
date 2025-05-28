@@ -2,3 +2,6 @@
 .vs/
 # building projects
 x64/
+*.zip
+*.avi
+*.mp4
