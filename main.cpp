@@ -28,7 +28,22 @@ bool createVideo(VideoCapture cap, VideoWriter& writer, string nameF, bool isRes
     }
     return true;
 }
+bool createVideo(VideoCapture cap, VideoWriter& writer, string nameF, Mat img) {
+    // Получение параметров видео
+    int frame_width = img.rows;
+    int frame_height = img.cols;
+    double fps = cap.get(CAP_PROP_FPS);
 
+    // Создание объекта для записи видео
+    writer = VideoWriter(nameF + ".avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), fps,
+        Size(frame_width, frame_height));
+
+    if (!writer.isOpened()) {
+        cerr << "Не удается создать запись" << endl;
+        return false;
+    }
+    return true;
+}
 #pragma endregion
 #pragma region Image process
 double computeMedian(Mat channel) {
@@ -338,13 +353,142 @@ int Task_3(bool isWrite = true, bool isMedian = false, int countFM = 30) {
     writer.release();
     cv::destroyAllWindows();
 }
+int Task_4(bool isWrite = true) {
+    namedWindow("Input image", WINDOW_AUTOSIZE);
+
+    VideoCapture cap; VideoWriter writer; VideoWriter writerEq;
+    cap.open("C:/Users/ilyah/Desktop/IS_RTK/Video/20180305_1337_Cam_1_07_00 Part.mp4");
+
+    if (!cap.isOpened()) {
+        cerr << "Не удается открыть видео файл" << endl;
+        return -1;
+    }
+    if (isWrite && !createVideo(cap, writer, "lab4")) {
+        return -1;
+    }
+    if (isWrite && !createVideo(cap, writerEq, "lab4_Equalize")) {
+        return -1;
+    }
+
+    std::ofstream logs, logsEq;
+    logs.open("points.csv");
+    logsEq.open("pointsEq.csv");
+    cout << logs.is_open() << endl;
+    cout << logsEq.is_open() << endl;
+
+    logs << "Frame" << "; " << "Count points" << "\n";
+    logsEq << "Equalized Frame" << "; " << "Count points" << "\n";
+
+    Mat frame;
+    int frame_count = 0;
+    int frame_row = 0;
+    double total_Y1 = 0;
+    double total_Y2 = 0;
+    Rect area;
+    int countFM = 10;
+
+    // Параметры для детектирования углов
+    int maxCorners = 4000;
+    double qualityLevel = 0.1;
+    int minDistance = 10;
+
+    for (;;)
+    {
+        cap >> frame;
+        if (frame.empty())
+            break;
+        frame_row = frame.cols;
+
+        Mat imgProc = frame.clone();
+        cv::cvtColor(imgProc, imgProc, cv::COLOR_BGR2GRAY);
+        if (frame_count < countFM) {
+
+            Mat edges;
+            cv::GaussianBlur(imgProc, edges, Size(7, 7), 0, 0);
+            edges = autoCanny(edges);
+            dilateImg(edges, false);
+
+            area = CalAreaInterest(edges);
+            total_Y1 += area.y;
+            total_Y2 += area.y + area.height;
+            edges.release();
+        }
+        else if (frame_count == countFM) 
+        {
+            area = Rect(0, (int)(total_Y1 / frame_count), frame_row, (int)((int)(total_Y2 / frame_count) - (int)(total_Y1 / frame_count)));
+            std::cout << "Расчитанная координата верхнего левого угла области интереса (" << area.x << ", " << area.y << ")" << endl;
+            std::cout << "Расчитанная координата нижнего правого угла области интереса (" << area.x + area.width << ", " << area.height + area.y << ")" << endl;
+        }
+        Mat roi = imgProc(area);
+        cv::rectangle(frame, area, Scalar(0, 255, 255), 1);
+
+        // Задание 1: обнаружение углов на исходном изображении
+        vector<Point2f> corners;
+        goodFeaturesToTrack(roi, corners, maxCorners, qualityLevel, minDistance);
+
+        // Рисуем углы на исходном кадре
+        Mat frameWithCorners1 = frame.clone();
+        Mat frameWithCorners2 = frame.clone();
+        for (const auto& corner : corners) {
+            Point p(corner.x + area.x, corner.y + area.y);
+            circle(frame, p, 3, Scalar(255, 0, 0), -1);
+            circle(frameWithCorners1, p, 3, Scalar(255, 0, 0), -1);
+        }
+        if (isWrite && writer.isOpened()) writer.write(frameWithCorners1);
+        logs << frame_count << "; " << corners.size() << "\n";
+        corners.clear();
+
+        // Задание 2: эквализация гистограммы перед обнаружением углов
+        Mat roiGrayEq;
+        equalizeHist(roi, roiGrayEq);
+        //cv::GaussianBlur(roiGrayEq, roiGrayEq, Size(11, 11), 0, 0);
+        imshow("Equalize", roiGrayEq);
+
+        goodFeaturesToTrack(roiGrayEq, corners, maxCorners, qualityLevel, minDistance);
+
+        // Рисуем углы на исходном кадре (после эквализации)
+        for (const auto& corner : corners) {
+            Point p(corner.x + area.x, corner.y + area.y);
+            circle(frame, p, 3, Scalar(0, 0, 255), -1);
+            circle(frameWithCorners2, p, 3, Scalar(0, 0, 255), -1);
+        }
+        if (isWrite && writerEq.isOpened()) writerEq.write(frameWithCorners2);
+        logsEq << frame_count << "; " << corners.size() << "\n";
+        corners.clear();
+            
+        imshow("Input image", frame);
+        
+        if (waitKey(1) == 27) break; // ESC для выхода
+
+        frame_count++;
+
+        if (cv::waitKey(27) >= 0)
+            break;
+        // clear
+        frame.release();
+        imgProc.release();
+        roiGrayEq.release();
+        roi.release();
+        frameWithCorners1.release();
+        frameWithCorners2.release();
+    }
+
+    // Вывод статистики
+
+    // clear
+    logs.close();
+    logsEq.close();
+    cap.release();
+    writer.release();
+    cv::destroyAllWindows();
+}
 #pragma endregion
 
 int main()
 {
     setlocale(LC_ALL, "Russian");
 
-    Task_3(true, true);
+    Task_4(true);
     return 0;
 }
 
