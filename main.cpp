@@ -1,11 +1,19 @@
 #include "opencv2/highgui/highgui.hpp"
 #include "opencv2/imgproc/imgproc.hpp"
+#include "opencv2/features2d.hpp"
 #include <iostream>
 #include <fstream>
 #include <chrono>
+#include <vector>
+#include <map>
+#include <algorithm>
 
 using namespace std;
 using namespace cv;
+
+// Константы
+const int MAX_FEATURES = 1000;
+const double MAX_DISTANCE_POINTS = 50;
 
 #pragma region File
 bool createVideo(VideoCapture cap, VideoWriter& writer, string nameF, bool isResize = false) {
@@ -45,6 +53,7 @@ bool createVideo(VideoCapture cap, VideoWriter& writer, string nameF, Mat img) {
     return true;
 }
 #pragma endregion
+
 #pragma region Image process
 double computeMedian(Mat channel) {
     double median = 0.0;
@@ -163,324 +172,140 @@ Rect CalAreaInterest(Mat binImg) {
     return  Rect (0, center_horasionR.y, binImg.cols, (carR.y - center_horasionR.y));
 }
 #pragma endregion
+
+#pragma region Utils
+Rect computeROI(const Mat& frame) {
+    return Rect(int(1.0f/4.0f * (float)frame.cols), int(float(frame.rows) * 1.0f / 3.0f), int(3.0f / 5.0f * (float)frame.cols), int(float(frame.rows) * 2.0f / 4.0f));
+}
+double distanceP(Point2f a, Point2f b) {
+    return sqrt(pow(a.x - b.x, 2) + pow(a.y - b.y, 2));
+}
+#pragma endregion
+
 #pragma region Tasks
-int Task_2(std::ofstream& logs, bool isLine = false, bool isResize = false, bool isWrite = true) {
-    namedWindow("Input image", WINDOW_AUTOSIZE);
-
-    VideoCapture cap; VideoWriter writer;
-    cap.open("C:/Users/ilyah/Desktop/IS_RTK/Video/20180305_1337_Cam_1_07_00 Part.mp4");
-
+int New_Task_2(bool isWrite = true) {
+    VideoCapture cap("C:/Users/ilyah/Desktop/MGY/IS_RTK/Video/Movement 01.mp4");
     if (!cap.isOpened()) {
-        cerr << "Не удается открыть видео файл" << endl;
+        cerr << "Ошибка: не удалось открыть видеофайл." << endl;
         return -1;
     }
-    if (isWrite && !createVideo(cap, writer, !isResize ? "lab2" : "lab2_resize", true)) {
-        return -1;
+
+    int width = static_cast<int>(cap.get(CAP_PROP_FRAME_WIDTH));
+    int height = static_cast<int>(cap.get(CAP_PROP_FRAME_HEIGHT));
+    double fps = cap.get(CAP_PROP_FPS);
+    VideoWriter writer;
+
+    if (isWrite) {
+        writer = VideoWriter("lab_2.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, Size(width, height));
+        if (!writer.isOpened()) {
+            cerr << "Ошибка: не удалось создать видеофайл для записи." << endl;
+            return -1;
+        }
     }
+
+    ofstream logFile("frame_stats.csv");
+    logFile << "frame;detected;matched;total_ms;detect_ms;match_ms\n";
+
+    Ptr<ORB> orb = ORB::create(MAX_FEATURES);
+    Ptr<BFMatcher> matcher = BFMatcher::create(NORM_HAMMING, true);
+
+    vector<Point2f> prevPointsGlobal;
+    Mat prevDescriptors;
+
+    const string winName = "ORB Feature Tracks (2-frame)";
+    namedWindow(winName, WINDOW_NORMAL);
+    resizeWindow(winName, min(1280, width), min(720, height));
 
     Mat frame;
-    int frame_count = 0;
-    double total_time = 0;
-    double total_upC = 0;
-    double total_lowC = 0;
-    double total_timeR = 0;
+    Rect roi;
+    int frameNum = 0;
+    bool isFirst = true;
 
-    for (;;)
-    {
-        cap >> frame;
-        if (frame.empty())
-            break;
-        if (isResize) 
-        {
-            auto startR = chrono::high_resolution_clock::now();
-            cv::resize(frame, frame, Size(frame.cols / 4, frame.rows / 4));
-            // stop timer
-            auto stopR = chrono::high_resolution_clock::now();
-            auto durationR = chrono::duration_cast<chrono::milliseconds>(stopR - startR);
-            total_timeR += durationR.count();
+    while (cap.read(frame)) {
+        if (frame.empty()) break;
+        if (isFirst) {
+            roi = computeROI(frame);
+            isFirst = false;
+        }
+        Mat roiImg = frame(roi);
+
+        rectangle(frame, Point(roi.x, roi.y), Point(roi.x + roi.width, roi.y + roi.height), Scalar(255, 255, 0), 5, LINE_8, 0);
+
+        auto startDetect = chrono::high_resolution_clock::now();
+        vector<KeyPoint> currKeypoints;
+        Mat currDescriptors;
+        orb->detectAndCompute(roiImg, Mat(), currKeypoints, currDescriptors);
+        auto stopDetect = chrono::high_resolution_clock::now();
+        double detectMs = chrono::duration_cast<chrono::microseconds>(stopDetect - startDetect).count() / 1000.0;
+        int detected = (int)currKeypoints.size();
+
+        vector<DMatch> matches;
+        double matchMs = 0.0;
+        int matched = 0;
+
+        if (!prevDescriptors.empty() && !currDescriptors.empty()) {
+            auto startMatch = chrono::high_resolution_clock::now();
+            matcher->match(prevDescriptors, currDescriptors, matches);
+            auto stopMatch = chrono::high_resolution_clock::now();
+            matchMs = chrono::duration_cast<chrono::microseconds>(stopMatch - startMatch).count() / 1000.0;
         }
 
-        // start timer
-        auto start = chrono::high_resolution_clock::now();
-        Mat imgProc = frame.clone();
-        cv::cvtColor(imgProc, imgProc, cv::COLOR_BGR2GRAY);
-        cv::GaussianBlur(imgProc, imgProc, Size(7, 7), 0, 0);
-        int low, up = 0;
-        Mat edges = autoCanny(imgProc, low, up);
-        total_lowC += low;
-        total_upC += up;
-        dilateImg(edges);
+        vector<Point2f> currPointsGlobal;
+        for (const auto& kp : currKeypoints) {
+            currPointsGlobal.push_back(Point2f(kp.pt.x + roi.x, kp.pt.y + roi.y));
+        }
 
-        // stop timer
-        auto stop = chrono::high_resolution_clock::now();
-        auto duration = chrono::duration_cast<chrono::milliseconds>(stop - start);
-        total_time += duration.count();
-
-        vector<vector<Point> > contours;
-        vector<Vec4i> hierarchy;
-        // Horasion
-        int maxContidG;
-        float sumArG = 0;
-
-        findContours(edges, contours, hierarchy, cv::RETR_TREE, cv::CHAIN_APPROX_SIMPLE);
-        for (size_t i = 0; i < contours.size(); i++)
-        {
-            drawContours(frame, contours, (int)i, Scalar(255, 0, 0), 2, LINE_8, hierarchy, 0);
-            if (isLine) {
-                cv::Moments M = cv::moments(contours[i]);
-                double newArea = cv::contourArea(contours[i]);
-                if (M.m01 / M.m00 < frame.rows / 2) {
-                    if (newArea > sumArG) {
-                        sumArG = newArea;
-                        maxContidG = i;
-                    }
+        for (const auto& m : matches) {
+            int prevIdx = m.queryIdx;
+            int currIdx = m.trainIdx;
+            if (prevIdx < (int)prevPointsGlobal.size() && currIdx < (int)currPointsGlobal.size()) {
+                if (distanceP(prevPointsGlobal[prevIdx], currPointsGlobal[currIdx]) < MAX_DISTANCE_POINTS) {
+                    line(frame, prevPointsGlobal[prevIdx], currPointsGlobal[currIdx], Scalar(255, 0, 0), 1);
+                    matched++;
                 }
+                circle(frame, currPointsGlobal[currIdx], 3, Scalar(0, 0, 255), -1);
             }
         }
-        if (isLine) {
-            Vec4f line;
-            fitLine(contours.at(maxContidG), line, DIST_L1, 0, 0.01, 0.01);
-            float vx = line[0], vy = line[1], x0 = line[2], y0 = line[3];
-            Point2f pt1(x0 - vx * 1000, y0 - vy * 1000); // Start point of line
-            Point2f pt2(x0 + vx * 1000, y0 + vy * 1000); // End point of line
-            cv::line(frame, (Point)pt1, (Point)pt2, Scalar(0, 0, 255), 2);
+
+        vector<bool> usedCurr(currKeypoints.size(), false);
+        for (const auto& m : matches) {
+            if (m.trainIdx < (int)usedCurr.size())
+                usedCurr[m.trainIdx] = true;
         }
-        // Запись кадра в видеофайл
+        for (size_t i = 0; i < currKeypoints.size(); ++i) {
+            if (!usedCurr[i]) {
+                circle(frame, currPointsGlobal[i], 3, Scalar(0, 0, 255), -1);
+            }
+        }
+
+        double totalMs = detectMs + matchMs;
+        logFile << frameNum << ";"
+            << detected << ";"
+            << matched << ";"
+            << totalMs << ";"
+            << detectMs << ";"
+            << matchMs << "\n";
+
+        currPointsGlobal.swap(prevPointsGlobal);
+        currDescriptors.copyTo(prevDescriptors);
+
         if (isWrite) writer.write(frame);
+        imshow(winName, frame);
+        imshow("ROI", frame(roi));
+        if (waitKey(1) == 27) break; // ESC
 
-        //imshow("canny", edges);
-        imshow("Input image", frame);
-        frame_count++;
-
-        if (cv::waitKey(27) >= 0)
-            break;
-        frame.release();
-        edges.release();
-        imgProc.release();
+        frameNum++;
     }
 
-    setlocale(LC_ALL, "Russian");
-    // Вывод статистики
-    cout << "Общее количество кадров в файле: " << frame_count << endl;
-    cout << "Среднее время обработки кадра : " << total_time / frame_count << " ms" << endl;
-    if (isResize) cout << "Среднее время уменьшения размера кадра : " << total_timeR / frame_count << " ms" << endl;
-    cout << "Среднее значение threshold1 детектора Cannny : " << total_lowC / frame_count << endl;
-    cout << "Среднее значение threshold2 детектора Cannny : " << total_upC / frame_count << endl;
-    
-    // Report
-    logs << "Общее количество кадров в файле: " << frame_count << "\n";
-    logs << "Среднее время обработки кадра : " << total_time / frame_count << " ms" << "\n";
-    if (isResize) logs << "Среднее время уменьшения размера кадра : " << total_timeR / frame_count << " ms" << "\n";
-    logs << "Среднее значение threshold1 детектора Cannny : " << total_lowC / frame_count << "\n";
-    logs << "Среднее значение threshold2 детектора Cannny : " << total_upC / frame_count << "\n";
-
-    // clear
     cap.release();
-    writer.release();
+    if (isWrite) writer.release();
+    logFile.close();
     destroyAllWindows();
-}
-int Task_3(bool isWrite = true, bool isMedian = false, int countFM = 30) {
-    namedWindow("Input image", WINDOW_AUTOSIZE);
 
-    VideoCapture cap; VideoWriter writer;
-    cap.open("C:/Users/ilyah/Desktop/IS_RTK/Video/20180305_1337_Cam_1_07_00 Part.mp4");
-
-    if (!cap.isOpened()) {
-        cerr << "Не удается открыть видео файл" << endl;
-        return -1;
-    }
-    if (isWrite && !createVideo(cap, writer, "lab3")) {
-        return -1;
-    }
-
-    Mat frame;
-    int frame_count = 0;
-    int frame_row = 0;
-    double total_Y1 = 0;
-    double total_Y2 = 0;
-    Rect area;
-
-    for (;;)
-    {
-        cap >> frame;
-        if (frame.empty())
-            break;
-        frame_row = frame.cols;
-
-        Mat imgProc = frame.clone();
-        cv::cvtColor(imgProc, imgProc, cv::COLOR_BGR2GRAY);
-        cv::GaussianBlur(imgProc, imgProc, Size(7, 7), 0, 0);
-        Mat edges = autoCanny(imgProc);
-        dilateImg(edges, false);
-
-        if ((frame_count < countFM && isMedian) || !isMedian) {
-            area = CalAreaInterest(edges);
-            total_Y1 += area.y;
-            total_Y2 += area.y + area.height;
-        }
-        else if (isMedian && frame_count == countFM) {
-            area = Rect(0, (int)(total_Y1 / frame_count), frame_row, (int)((int)(total_Y2 / frame_count) - (int)(total_Y1 / frame_count)));
-            std::cout << "Расчитанная координата верхнего левого угла области интереса (" << area.x << ", " << area.y << ")" << endl;
-            std::cout << "Расчитанная координата нижнего правого угла области интереса (" << area.x + area.width << ", " << area.height + area.y << ")" << endl;
-        }
-        cv::rectangle(frame, area, Scalar(0, 0, 255), 3);
-
-        // Запись кадра в видеофайл
-        if (isWrite && writer.isOpened()) writer.write(frame);
-
-        //imshow("canny", edges);
-        imshow("Input image", frame);
-        if (waitKey(1) == 27) break; // ESC для выхода
-
-        frame_count++;
-
-        if (cv::waitKey(27) >= 0)
-            break;
-        frame.release();
-        edges.release();
-        imgProc.release();
-    }
-
-    // Вывод статистики
-    if (!isMedian) 
-    {
-        std::cout << "Средняя координата верхнего левого угла области интереса (" << 0 << ", " << (int)(total_Y1 / frame_count) << ")" << endl;
-        std::cout << "Средняя координата нижнего правого угла области интереса (" << frame_row << ", " << (int)(total_Y2 / frame_count) << ")" << endl;
-    }
-
-    // clear
-    cap.release();
-    writer.release();
-    cv::destroyAllWindows();
-}
-int Task_4(bool isWrite = true) {
-    namedWindow("Input image", WINDOW_AUTOSIZE);
-
-    VideoCapture cap; VideoWriter writer; VideoWriter writerEq;
-    cap.open("C:/Users/ilyah/Desktop/IS_RTK/Video/20180305_1337_Cam_1_07_00 Part.mp4");
-
-    if (!cap.isOpened()) {
-        cerr << "Не удается открыть видео файл" << endl;
-        return -1;
-    }
-    if (isWrite && !createVideo(cap, writer, "lab4")) {
-        return -1;
-    }
-    if (isWrite && !createVideo(cap, writerEq, "lab4_Equalize")) {
-        return -1;
-    }
-
-    std::ofstream logs, logsEq;
-    logs.open("points.csv");
-    logsEq.open("pointsEq.csv");
-    cout << logs.is_open() << endl;
-    cout << logsEq.is_open() << endl;
-
-    logs << "Frame" << "; " << "Count points" << "\n";
-    logsEq << "Equalized Frame" << "; " << "Count points" << "\n";
-
-    Mat frame;
-    int frame_count = 0;
-    int frame_row = 0;
-    double total_Y1 = 0;
-    double total_Y2 = 0;
-    Rect area;
-    int countFM = 10;
-
-    // Параметры для детектирования углов
-    int maxCorners = 4000;
-    double qualityLevel = 0.1;
-    int minDistance = 10;
-
-    for (;;)
-    {
-        cap >> frame;
-        if (frame.empty())
-            break;
-        frame_row = frame.cols;
-
-        Mat imgProc = frame.clone();
-        cv::cvtColor(imgProc, imgProc, cv::COLOR_BGR2GRAY);
-        if (frame_count < countFM) {
-
-            Mat edges;
-            cv::GaussianBlur(imgProc, edges, Size(7, 7), 0, 0);
-            edges = autoCanny(edges);
-            dilateImg(edges, false);
-
-            area = CalAreaInterest(edges);
-            total_Y1 += area.y;
-            total_Y2 += area.y + area.height;
-            edges.release();
-        }
-        else if (frame_count == countFM) 
-        {
-            area = Rect(0, (int)(total_Y1 / frame_count), frame_row, (int)((int)(total_Y2 / frame_count) - (int)(total_Y1 / frame_count)));
-            std::cout << "Расчитанная координата верхнего левого угла области интереса (" << area.x << ", " << area.y << ")" << endl;
-            std::cout << "Расчитанная координата нижнего правого угла области интереса (" << area.x + area.width << ", " << area.height + area.y << ")" << endl;
-        }
-        Mat roi = imgProc(area);
-        cv::rectangle(frame, area, Scalar(0, 255, 255), 1);
-
-        // Задание 1: обнаружение углов на исходном изображении
-        vector<Point2f> corners;
-        goodFeaturesToTrack(roi, corners, maxCorners, qualityLevel, minDistance);
-
-        // Рисуем углы на исходном кадре
-        Mat frameWithCorners1 = frame.clone();
-        Mat frameWithCorners2 = frame.clone();
-        for (const auto& corner : corners) {
-            Point p(corner.x + area.x, corner.y + area.y);
-            circle(frame, p, 3, Scalar(255, 0, 0), -1);
-            circle(frameWithCorners1, p, 3, Scalar(255, 0, 0), -1);
-        }
-        if (isWrite && writer.isOpened()) writer.write(frameWithCorners1);
-        logs << frame_count << "; " << corners.size() << "\n";
-        corners.clear();
-
-        // Задание 2: эквализация гистограммы перед обнаружением углов
-        Mat roiGrayEq;
-        equalizeHist(roi, roiGrayEq);
-        //cv::GaussianBlur(roiGrayEq, roiGrayEq, Size(11, 11), 0, 0);
-        imshow("Equalize", roiGrayEq);
-
-        goodFeaturesToTrack(roiGrayEq, corners, maxCorners, qualityLevel, minDistance);
-
-        // Рисуем углы на исходном кадре (после эквализации)
-        for (const auto& corner : corners) {
-            Point p(corner.x + area.x, corner.y + area.y);
-            circle(frame, p, 3, Scalar(0, 0, 255), -1);
-            circle(frameWithCorners2, p, 3, Scalar(0, 0, 255), -1);
-        }
-        if (isWrite && writerEq.isOpened()) writerEq.write(frameWithCorners2);
-        logsEq << frame_count << "; " << corners.size() << "\n";
-        corners.clear();
-            
-        imshow("Input image", frame);
-        
-        if (waitKey(1) == 27) break; // ESC для выхода
-
-        frame_count++;
-
-        if (cv::waitKey(27) >= 0)
-            break;
-        // clear
-        frame.release();
-        imgProc.release();
-        roiGrayEq.release();
-        roi.release();
-        frameWithCorners1.release();
-        frameWithCorners2.release();
-    }
-
-    // Вывод статистики
-
-    // clear
-    logs.close();
-    logsEq.close();
-    cap.release();
-    writer.release();
-    cv::destroyAllWindows();
+    cout << "Обработка завершена." << endl;
+    cout << "Видео: lab_2.avi" << endl;
+    cout << "Лог: frame_stats.csv" << endl;
+    cout << "Кадров обработано: " << frameNum << endl;
 }
 #pragma endregion
 
@@ -488,7 +313,7 @@ int main()
 {
     setlocale(LC_ALL, "Russian");
 
-    Task_4(true);
+    New_Task_2(true);
     return 0;
 }
 
