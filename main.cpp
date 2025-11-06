@@ -1,6 +1,8 @@
 #include "opencv2/highgui/highgui.hpp"
 #include "opencv2/imgproc/imgproc.hpp"
 #include "opencv2/features2d.hpp"
+#include "opencv2/calib3d.hpp"
+
 #include <iostream>
 #include <fstream>
 #include <chrono>
@@ -12,11 +14,14 @@ using namespace std;
 using namespace cv;
 
 // Константы
-const int MAX_FEATURES = 1000;
-const int GRID_HEIGTH = 2;
-const int GRID_WIDTH = 2;
-const int MAX_FEATURES_GRID = MAX_FEATURES / (GRID_HEIGTH * GRID_WIDTH);
-const double MAX_DISTANCE_POINTS = 50;
+const int COUNT_FRAME_SLEEP = 4;
+//const int COUNT_FRAME_SLEEP = 0;
+const int FRAME_LIMIT = 60;
+const int CHEST_WIDTH = 7;
+const int CHEST_HEIGTH = 7;
+const double CHEST_SIZE = 5.0; // in mm
+const double SENSOR_SIZE = 0.0055; // in mm
+const Size CHEST_GRID = Size(CHEST_WIDTH, CHEST_HEIGTH);
 
 // Values
 Rect roi;
@@ -67,9 +72,9 @@ bool createVideo(VideoCapture cap, VideoWriter& writer, string nameF, Mat img) {
 #pragma region Image process
 double computeMedian(Mat channel) {
     double median = 0.0;
-    std::vector<uchar> pixels;
+    vector<uchar> pixels;
     pixels.assign(channel.datastart, channel.dataend);
-    std::sort(pixels.begin(), pixels.end());
+    sort(pixels.begin(), pixels.end());
 
     if (pixels.size() % 2 == 0) {
         median = (pixels[pixels.size() / 2 - 1] + pixels[pixels.size() / 2]) / 2.0;
@@ -89,7 +94,7 @@ double computeMedian(Mat channel) {
 Mat autoCanny(const Mat& image, int& lower, int& upper, double sigma = 0.33) {
     double v = 0.0;
     if (image.channels() > 1) {
-        std::vector<Mat> channels;
+        vector<Mat> channels;
         cv::split(image, channels);
         v += computeMedian(channels[0]);
         v += computeMedian(channels[1]);
@@ -99,8 +104,8 @@ Mat autoCanny(const Mat& image, int& lower, int& upper, double sigma = 0.33) {
         v = computeMedian(image);
     }
 
-    lower = static_cast<int>(std::max(0.0, (1.0 - sigma) * v));
-    upper = static_cast<int>(std::min(255.0, (1.0 + sigma) * v));
+    lower = static_cast<int>(max(0.0, (1.0 - sigma) * v));
+    upper = static_cast<int>(min(255.0, (1.0 + sigma) * v));
 
     cv::Mat edged;
     cv::Canny(image, edged, lower, upper);
@@ -116,7 +121,7 @@ Mat autoCanny(const Mat& image, int& lower, int& upper, double sigma = 0.33) {
 Mat autoCanny(const Mat& image, double sigma = 0.33) {
     double v = 0.0;
     if (image.channels() > 1) {
-        std::vector<Mat> channels;
+        vector<Mat> channels;
         cv::split(image, channels);
         v += computeMedian(channels[0]);
         v += computeMedian(channels[1]);
@@ -126,8 +131,8 @@ Mat autoCanny(const Mat& image, double sigma = 0.33) {
         v = computeMedian(image);
     }
 
-    int lower = static_cast<int>(std::max(0.0, (1.0 - sigma) * v));
-    int upper = static_cast<int>(std::min(255.0, (1.0 + sigma) * v));
+    int lower = static_cast<int>(max(0.0, (1.0 - sigma) * v));
+    int upper = static_cast<int>(min(255.0, (1.0 + sigma) * v));
 
     cv::Mat edged;
     cv::Canny(image, edged, lower, upper);
@@ -190,158 +195,13 @@ Rect computeROI(const Mat& frame) {
 double distanceP(Point2f a, Point2f b) {
     return sqrt(pow(a.x - b.x, 2) + pow(a.y - b.y, 2));
 }
-
-vector<double> GetKeyPoints(Mat frame, Mat roiImg) {
-    std::vector<double> outTime(4);
-    auto startDetect = chrono::high_resolution_clock::now();
-    vector<KeyPoint> currKeypoints;
-    Mat currDescriptors;
-    orb->detectAndCompute(roiImg, Mat(), currKeypoints, currDescriptors);
-    auto stopDetect = chrono::high_resolution_clock::now();
-    outTime[2] = chrono::duration_cast<chrono::microseconds>(stopDetect - startDetect).count() / 1000.0;
-    outTime[0] = (int)currKeypoints.size();
-
-    vector<DMatch> matches;
-    outTime[3] = 0.0;
-    outTime[1] = 0;
-
-    if (!prevDescriptors.empty() && !currDescriptors.empty()) {
-        auto startMatch = chrono::high_resolution_clock::now();
-        matcher->match(prevDescriptors, currDescriptors, matches);
-        auto stopMatch = chrono::high_resolution_clock::now();
-        outTime[3] = chrono::duration_cast<chrono::microseconds>(stopMatch - startMatch).count() / 1000.0;
-    }
-
-    vector<Point2f> currPointsGlobal;
-    for (const auto& kp : currKeypoints) {
-        currPointsGlobal.push_back(Point2f(kp.pt.x + roi.x, kp.pt.y + roi.y));
-    }
-
-    for (const auto& m : matches) {
-        int prevIdx = m.queryIdx;
-        int currIdx = m.trainIdx;
-        if (prevIdx < (int)prevPointsGlobal.size() && currIdx < (int)currPointsGlobal.size()) {
-            if (distanceP(prevPointsGlobal[prevIdx], currPointsGlobal[currIdx]) < MAX_DISTANCE_POINTS) {
-                line(frame, prevPointsGlobal[prevIdx], currPointsGlobal[currIdx], Scalar(255, 0, 0), 1);
-                outTime[1]++;
-            }
-            circle(frame, currPointsGlobal[currIdx], 3, Scalar(0, 0, 255), -1);
-        }
-    }
-
-    vector<bool> usedCurr(currKeypoints.size(), false);
-    for (const auto& m : matches) {
-        if (m.trainIdx < (int)usedCurr.size())
-            usedCurr[m.trainIdx] = true;
-    }
-    for (size_t i = 0; i < currKeypoints.size(); ++i) {
-        if (!usedCurr[i]) {
-            circle(frame, currPointsGlobal[i], 3, Scalar(0, 0, 255), -1);
-        }
-    }
-
-    currPointsGlobal.swap(prevPointsGlobal);
-    currDescriptors.copyTo(prevDescriptors);
-    return outTime;
-}
-vector<double> GetKeyPointsGrid(Mat frame, Mat roiImg, Ptr<ORB> orb) {
-    std::vector<double> outTime(4 + (4 * (GRID_HEIGTH * GRID_WIDTH)));
-    /*
-times:
-    -0 - frame
-    0 - detected_all
-    1 - matched_all
-     - total_ms_all (4 + 5)
-    2 - detect_ms_all
-    3 - match_ms_all
-    4 - detected_i
-    5 - matched_i
-     - total_ms_i (9 + 10)
-    6 - detect_ms_i
-    7 - match_ms_i
-*/
-    vector<Point2f> currPointsGlobalAll;
-    Mat currDescriptorsAll;
-    int height = roiImg.rows / GRID_HEIGTH;
-    int width = roiImg.cols / GRID_WIDTH;
-
-    int id = 1;
-    for (int j = 0; j < GRID_HEIGTH; j++) {
-        for (int i = 0; i < GRID_WIDTH; i++) {
-            cv::Rect roiGr(i * width, j * height, width, height);
-
-            Mat roiImgGr = roiImg(roiGr);
-            auto startDetect = chrono::high_resolution_clock::now();
-            vector<KeyPoint> currKeypoints;
-            Mat currDescriptors;
-            orb->detectAndCompute(roiImgGr, Mat(), currKeypoints, currDescriptors);
-            auto stopDetect = chrono::high_resolution_clock::now();
-            outTime[2] += chrono::duration_cast<chrono::microseconds>(stopDetect - startDetect).count() / 1000.0;
-            outTime[id * 4 + 2] += chrono::duration_cast<chrono::microseconds>(stopDetect - startDetect).count() / 1000.0;
-            outTime[0] += (int)currKeypoints.size();
-            outTime[id * 4 + 0] = (int)currKeypoints.size();
-
-            vector<Point2f> currPointsGlobal;
-            for (const auto& kp : currKeypoints) {
-                currPointsGlobal.push_back(Point2f(kp.pt.x + roi.x + i * width, kp.pt.y + roi.y + j * height));
-            }
-
-            vector<DMatch> matches;
-            outTime[id * 4 + 3] = 0.0;
-            outTime[id * 4 + 1] = 0;
-
-            if (!prevDescriptors.empty() && !currDescriptors.empty()) {
-                auto startMatch = chrono::high_resolution_clock::now();
-                matcher->match(prevDescriptors, currDescriptors, matches);
-                auto stopMatch = chrono::high_resolution_clock::now();
-                outTime[id * 4 + 3] = chrono::duration_cast<chrono::microseconds>(stopMatch - startMatch).count() / 1000.0;
-            }
-            outTime[3] += outTime[id * 4 + 3];
-
-            for (const auto& m : matches) {
-                int prevIdx = m.queryIdx;
-                int currIdx = m.trainIdx;
-                if (prevIdx < (int)prevPointsGlobal.size() && currIdx < (int)currPointsGlobal.size()) {
-                    if (distanceP(prevPointsGlobal[prevIdx], currPointsGlobal[currIdx]) < MAX_DISTANCE_POINTS) {
-                        line(frame, prevPointsGlobal[prevIdx], currPointsGlobal[currIdx], Scalar(255, 0, 0), 1);
-                        outTime[id * 4 + 1]++;
-                    }
-                    circle(frame, currPointsGlobal[currIdx], 3, Scalar(0, 0, 255), -1);
-                }
-            }
-            outTime[1] += outTime[id * 4 + 1];
-
-            vector<bool> usedCurr(currPointsGlobal.size(), false);
-            for (const auto& m : matches) {
-                if (m.trainIdx < (int)usedCurr.size())
-                    usedCurr[m.trainIdx] = true;
-            }
-            for (size_t i = 0; i < currPointsGlobal.size(); ++i) {
-                if (!usedCurr[i]) {
-                    circle(frame, currPointsGlobal[i], 3, Scalar(0, 0, 255), -1);
-                }
-            }
-
-            if (currDescriptorsAll.empty()) {
-                currDescriptorsAll = currDescriptors.clone();
-            }
-            else if (!currDescriptors.empty()) {
-                cv::vconcat(currDescriptorsAll, currDescriptors, currDescriptorsAll);
-            }
-            currPointsGlobalAll.insert(currPointsGlobalAll.end(), currPointsGlobal.begin(), currPointsGlobal.end());
-            id++;
-        }
-    }
-
-    currPointsGlobalAll.swap(prevPointsGlobal);
-    currDescriptorsAll.copyTo(prevDescriptors);
-    return outTime;
-}
 #pragma endregion
 
 #pragma region Tasks
-int New_Task_2(bool isWrite = true) {
-    VideoCapture cap("C:/Users/ilyah/Desktop/MGY/IS_RTK/Video/Movement 01.mp4");
+int New_Task_3(bool isWrite = true, bool isFirstVideo = true) {
+    VideoCapture cap;
+    if (isFirstVideo) cap = VideoCapture("C:/Users/ilyah/Desktop/MGY/IS_RTK/Video/Calibration_01.mp4");
+    else cap = VideoCapture("C:/Users/ilyah/Desktop/MGY/IS_RTK/Video/Calibration_02.mp4");
     if (!cap.isOpened()) {
         cerr << "Ошибка: не удалось открыть видеофайл." << endl;
         return -1;
@@ -353,221 +213,176 @@ int New_Task_2(bool isWrite = true) {
     VideoWriter writer;
 
     if (isWrite) {
-        writer = VideoWriter("lab_2.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, Size(width, height));
+        if (isFirstVideo) writer = VideoWriter("lab_3_1.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, Size(width, height));
+        else writer = VideoWriter("lab_3_2.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, Size(width, height));
         if (!writer.isOpened()) {
             cerr << "Ошибка: не удалось создать видеофайл для записи." << endl;
             return -1;
         }
     }
 
-    ofstream logFile("frame_stats.csv");
-    logFile << "frame;detected;matched;total_ms;detect_ms;match_ms\n";
+    ofstream logFile;
+    if (isFirstVideo) logFile = ofstream("calibration_1.txt", ios::out | ios::binary);
+    else logFile = ofstream("calibration_2.txt", ios::out | ios::binary);
 
-    Ptr<ORB> orb = ORB::create(MAX_FEATURES);
-    Ptr<BFMatcher> matcher = BFMatcher::create(NORM_HAMMING, true);
-
-    const string winName = "ORB Feature Tracks (2-frame)";
+    const string winName = "Calibration image";
     namedWindow(winName, WINDOW_NORMAL);
-    resizeWindow(winName, min(1280, width), min(720, height));
+    resizeWindow(winName, min(1000, width), min(1000, height));
 
     Mat frame;
-    Rect roi;
     int frameNum = 0;
-    bool isFirst = true;
+    int frameFoundNum = 0;
+    vector <vector<Point2f>> imagePoints;
+    vector <vector<Point3f>> objectPoints;
 
+    cout << "Подготовка данных калибровки" << endl;
+    // Prepare object points (3D coordinates of chessboard corners in world space)
+    vector<cv::Point3f> objectPointsInit;
+    for (int i = 0; i < CHEST_HEIGTH; ++i) {
+        for (int j = 0; j < CHEST_WIDTH; ++j) {
+            objectPointsInit.push_back(cv::Point3f(j * CHEST_SIZE, i * CHEST_SIZE, 0.0f));
+        }
+    }
+    bool isFirst = true;
+    Size imgSize;
+    cout << "Начало обработки кадров" << endl;
     while (cap.read(frame)) {
         if (frame.empty()) break;
         if (isFirst) {
-            roi = computeROI(frame);
+            imgSize = frame.size();
             isFirst = false;
         }
-        Mat roiImg = frame(roi);
-
-        rectangle(frame, Point(roi.x, roi.y), Point(roi.x + roi.width, roi.y + roi.height), Scalar(255, 255, 0), 5, LINE_8, 0);
-
-        auto startDetect = chrono::high_resolution_clock::now();
-        vector<KeyPoint> currKeypoints;
-        Mat currDescriptors;
-        orb->detectAndCompute(roiImg, Mat(), currKeypoints, currDescriptors);
-        auto stopDetect = chrono::high_resolution_clock::now();
-        double detectMs = chrono::duration_cast<chrono::microseconds>(stopDetect - startDetect).count() / 1000.0;
-        int detected = (int)currKeypoints.size();
-
-        vector<DMatch> matches;
-        double matchMs = 0.0;
-        int matched = 0;
-
-        if (!prevDescriptors.empty() && !currDescriptors.empty()) {
-            auto startMatch = chrono::high_resolution_clock::now();
-            matcher->match(prevDescriptors, currDescriptors, matches);
-            auto stopMatch = chrono::high_resolution_clock::now();
-            matchMs = chrono::duration_cast<chrono::microseconds>(stopMatch - startMatch).count() / 1000.0;
-        }
-
-        vector<Point2f> currPointsGlobal;
-        for (const auto& kp : currKeypoints) {
-            currPointsGlobal.push_back(Point2f(kp.pt.x + roi.x, kp.pt.y + roi.y));
-        }
-
-        for (const auto& m : matches) {
-            int prevIdx = m.queryIdx;
-            int currIdx = m.trainIdx;
-            if (prevIdx < (int)prevPointsGlobal.size() && currIdx < (int)currPointsGlobal.size()) {
-                if (distanceP(prevPointsGlobal[prevIdx], currPointsGlobal[currIdx]) < MAX_DISTANCE_POINTS) {
-                    line(frame, prevPointsGlobal[prevIdx], currPointsGlobal[currIdx], Scalar(255, 0, 0), 1);
-                    matched++;
-                }
-                circle(frame, currPointsGlobal[currIdx], 3, Scalar(0, 0, 255), -1);
-            }
-        }
-
-        vector<bool> usedCurr(currKeypoints.size(), false);
-        for (const auto& m : matches) {
-            if (m.trainIdx < (int)usedCurr.size())
-                usedCurr[m.trainIdx] = true;
-        }
-        for (size_t i = 0; i < currKeypoints.size(); ++i) {
-            if (!usedCurr[i]) {
-                circle(frame, currPointsGlobal[i], 3, Scalar(0, 0, 255), -1);
-            }
-        }
-
-        double totalMs = detectMs + matchMs;
-        logFile << frameNum << ";"
-            << detected << ";"
-            << matched << ";"
-            << totalMs << ";"
-            << detectMs << ";"
-            << matchMs << "\n";
-
-        currPointsGlobal.swap(prevPointsGlobal);
-        currDescriptors.copyTo(prevDescriptors);
-
-        if (isWrite) writer.write(frame);
-        imshow(winName, frame);
-        imshow("ROI", frame(roi));
-        if (waitKey(1) == 27) break; // ESC
-
         frameNum++;
-    }
 
-    cap.release();
-    if (isWrite) writer.release();
-    logFile.close();
-    destroyAllWindows();
+        if (COUNT_FRAME_SLEEP != 0 && frameNum % COUNT_FRAME_SLEEP != 0) continue;
+        if (frameFoundNum >= FRAME_LIMIT) break;
 
-    cout << "Обработка завершена." << endl;
-    cout << "Видео: lab_2.avi" << endl;
-    cout << "Лог: frame_stats.csv" << endl;
-    cout << "Кадров обработано: " << frameNum << endl;
-}
-int New_Task_2_Grid(bool isWrite = true) {
-    VideoCapture cap("C:/Users/ilyah/Desktop/MGY/IS_RTK/Video/Movement 01.mp4");
-    if (!cap.isOpened()) {
-        cerr << "Ошибка: не удалось открыть видеофайл." << endl;
-        return -1;
-    }
+        cv::Mat grayImage;
+        cv::cvtColor(frame, grayImage, cv::COLOR_BGR2GRAY);
 
-    int width = static_cast<int>(cap.get(CAP_PROP_FRAME_WIDTH));
-    int height = static_cast<int>(cap.get(CAP_PROP_FRAME_HEIGHT));
-    double fps = cap.get(CAP_PROP_FPS);
-    VideoWriter writer;
+        vector<Point2f> pointBuf;
+        bool isFind = cv::findChessboardCorners(grayImage, CHEST_GRID, pointBuf, CALIB_CB_ADAPTIVE_THRESH | CALIB_CB_NORMALIZE_IMAGE);
 
-    if (isWrite) {
-        writer = VideoWriter("lab_2_grid.avi", VideoWriter::fourcc('M', 'J', 'P', 'G'), fps, Size(width, height));
-        if (!writer.isOpened()) {
-            cerr << "Ошибка: не удалось создать видеофайл для записи." << endl;
-            return -1;
-        }
-    }
-
-    ofstream logFile("frame_stats_grid.csv", std::ios::out | std::ios::trunc);
-    logFile << "frame;detected_all;matched_all;total_ms_all;detect_ms_all;match_ms_all;";
-
-    for (int i = 0; i < GRID_HEIGTH * GRID_WIDTH; i++) 
-    {
-        logFile << "detected_" << i << ";matched_" << i << ";total_ms_" << i << ";detect_ms_" << i << ";match_ms_" << i << ";";
-    }
-    logFile << "\n";
-
-    orb = ORB::create(MAX_FEATURES_GRID);
-    matcher = BFMatcher::create(NORM_HAMMING, true);
-
-    const string winName = "ORB Feature Tracks (2-frame)";
-    namedWindow(winName, WINDOW_NORMAL);
-    resizeWindow(winName, min(1280, width), min(720, height));
-
-    Mat frame;
-    int frameNum = 0;
-    bool isFirst = true;
-
-    while (cap.read(frame)) {
-        if (frame.empty()) break;
-        if (isFirst) {
-            roi = computeROI(frame);
-            isFirst = false;
-        }
-        Mat roiImg = frame(roi);
-
-        auto times = GetKeyPointsGrid(frame, roiImg, orb);
-        /*
-        times:
-            0 - frame
-            1 - detected_all
-            2 - matched_all
-            3 - total_ms_all (4 + 5)
-            4 - detect_ms_all
-            5 - match_ms_all
-            6 - detected_i
-            7 - matched_i
-            8 - total_ms_i
-            9 - detect_ms_i
-            10 - match_ms_i
-        */
-        // Write Logs
-        logFile << frameNum << ";"
-            << times[0] << ";"
-            << times[1] << ";"
-            << times[2] + times[3] << ";"
-            << times[2] << ";"
-            << times[3];
-
-        for (int i = 0; i < GRID_HEIGTH * GRID_WIDTH; i++)
+        if (isFind)                // If done with success,
         {
-            logFile << times[4 + 4 * i + 0] << ";"
-                << times[4 + 4 * i + 1] << ";"
-                << times[4 + 4 * i + 2] + times[4 + 4 * i + 3] << ";"
-                << times[4 + 4 * i + 2] << ";"
-                << times[4 + 4 * i + 3] << ";";
+            // improve the found corners' coordinate accuracy for chessboard
+            cornerSubPix(grayImage, pointBuf, Size(11, 11),
+                Size(-1, -1), TermCriteria(TermCriteria::EPS + TermCriteria::COUNT, 30, 0.0001));
+
+            imagePoints.push_back(pointBuf);
+            objectPoints.push_back(objectPointsInit);
+            drawChessboardCorners(frame, CHEST_GRID, Mat(pointBuf), true);
+            if (isWrite) writer.write(frame);
+            frameFoundNum++;
+        }
+        else {
+            cout << frameNum << " - Плохой кадр" << endl;
+            cv::putText(frame, //target image
+                "BAD FRAME", //text
+                cv::Point(10, frame.rows / 2), //top-left position
+                cv::FONT_HERSHEY_DUPLEX,
+                1.0,
+                CV_RGB(118, 185, 0), //font color
+                2);
         }
 
-        logFile << "\n";
-
-        rectangle(frame, Point(roi.x, roi.y), Point(roi.x + roi.width, roi.y + roi.height), Scalar(255, 255, 0), 5, LINE_8, 0);
-        for (int i = 1; i < GRID_HEIGTH; i++) {
-            line(frame, Point(roi.x, roi.y + i * roiImg.rows / GRID_HEIGTH), Point(roi.x + roi.width, roi.y + i * roiImg.rows / GRID_HEIGTH), Scalar(0, 255, 0), 2, LINE_8, 0);
-        }
-        for (int i = 1; i < GRID_WIDTH; i++) {
-            line(frame, Point(roi.x + i * roiImg.cols / GRID_WIDTH, roi.y), Point(roi.x + i * roiImg.cols / GRID_WIDTH, roi.y + roi.height), Scalar(0, 255, 0), 2, LINE_8, 0);
-        }
-
-        if (isWrite) writer.write(frame);
-        imshow(winName, frame);
-        imshow("ROI", frame(roi));
+        cv::imshow(winName, frame);
         if (waitKey(1) == 27) break; // ESC
-
-        frameNum++;
+        grayImage.release();
+        frame.release();
     }
-
+    destroyAllWindows();
     cap.release();
     if (isWrite) writer.release();
-    logFile.close();
-    destroyAllWindows();
 
     cout << "Обработка завершена." << endl;
-    cout << "Видео: lab_2_grid.avi" << endl;
-    cout << "Лог: frame_stats_grid.csv" << endl;
+    cout << "Калибровка по изображениям начата:" << endl;
+
+    /// Calculate calibration parameters
+    cv::Mat cameraMatrix, distCoeffs;
+    vector<cv::Mat> rvecs, tvecs; // Rotation and translation vectors
+
+    if (!imagePoints.empty()) {
+        double rms = cv::calibrateCamera(objectPoints, imagePoints, imgSize,
+            cameraMatrix, distCoeffs, rvecs, tvecs);
+
+        cout << "Ошибка калибровки: " << rms << endl;
+        logFile << u8"Ошибка калибровки: " << rms << "\n";
+
+        cout << "Матрица камеры:\n" << cameraMatrix << endl;
+        logFile << u8"Матрица камеры:\n" << cameraMatrix << "\n";
+
+        cout << "Коэффициенты дисторсии:\n" << distCoeffs << endl;
+        logFile << u8"Коэффициенты дисторсии:\n" << distCoeffs << "\n";
+
+        // Сохранение в YAML (не зависит от кодировки текста)
+        cv::FileStorage fs;
+        if (isFirstVideo) fs = cv::FileStorage("camera_calibration_1.yml", cv::FileStorage::WRITE);
+        else fs = cv::FileStorage("camera_calibration_2.yml", cv::FileStorage::WRITE);
+        fs << "camera_matrix" << cameraMatrix;
+        fs << "dist_coeffs" << distCoeffs;
+        fs.release();
+
+        // Извлечение параметров
+        double fx = cameraMatrix.at<double>(0, 0);
+        double fy = cameraMatrix.at<double>(1, 1);
+        double cx = cameraMatrix.at<double>(0, 2);
+        double cy = cameraMatrix.at<double>(1, 2);
+
+        // Перевод в миллиметры
+        double fx_mm = fx * SENSOR_SIZE;
+        double fy_mm = fy * SENSOR_SIZE;
+        double cx_mm = cx * SENSOR_SIZE;
+        double cy_mm = cy * SENSOR_SIZE;
+
+        // Фокусное расстояние
+        cout << "Фокусное расстояние:\n";
+        cout << "  fx = " << fx << " px  ->  " << fx_mm << " мм\n";
+        cout << "  fy = " << fy << " px  ->  " << fy_mm << " мм\n";
+
+        logFile << u8"Фокусное расстояние:\n";
+        logFile << "  fx = " << fx << " px  ->  " << fx_mm << u8" мм\n";
+        logFile << "  fy = " << fy << " px  ->  " << fy_mm << u8" мм\n";
+
+        // Главная точка
+        cout << "\nГлавная точка:\n";
+        cout << "  cx = " << cx << " px  ->  " << cx_mm << " мм\n";
+        cout << "  cy = " << cy << " px  ->  " << cy_mm << " мм\n";
+
+        logFile << u8"\nГлавная точка:\n";
+        logFile << "  cx = " << cx << " px  ->  " << cx_mm << u8" мм\n";
+        logFile << "  cy = " << cy << " px  ->  " << cy_mm << u8" мм\n";
+
+        // Смещение от центра
+        double sensor_width_mm = imgSize.width * SENSOR_SIZE;
+        double sensor_height_mm = imgSize.height * SENSOR_SIZE;
+        double center_x_mm = sensor_width_mm / 2.0;
+        double center_y_mm = sensor_height_mm / 2.0;
+
+        double offset_x_mm = cx_mm - center_x_mm;
+        double offset_y_mm = cy_mm - center_y_mm;
+
+        cout << "\nСмещение главной точки от центра сенсора:\n";
+        cout << "  dx = " << offset_x_mm << " мм\n";
+        cout << "  dy = " << offset_y_mm << " мм\n";
+
+        logFile << u8"\nСмещение главной точки от центра сенсора:\n";
+        logFile << "  dx = " << offset_x_mm << u8" мм\n";
+        logFile << "  dy = " << offset_y_mm << u8" мм\n";
+    }
+    else {
+        cout << u8"Ошибка калибровки!!!!" << endl;
+        logFile << u8"Ошибка калибровки!!!!\n";
+    }
+
     cout << "Кадров обработано: " << frameNum << endl;
+    logFile << u8"Кадров обработано: " << frameNum << "\n";
+    cout << "Успешно найденых кадров: " << frameFoundNum << endl;
+    logFile << u8"Успешно найденых кадров: " << frameFoundNum << "\n";
+    cout << "Размер изображения: " << imgSize.width << "x" << imgSize.height << endl;
+    logFile << u8"Размер изображения: " << imgSize.width << "x" << imgSize.height << "\n";
+
+    logFile.close();
 }
 #pragma endregion
 
@@ -575,14 +390,13 @@ int main()
 {
     setlocale(LC_ALL, "Russian");
 
-    //New_Task_2(false);
-    New_Task_2_Grid(true);
+    New_Task_3(true, true);
     return 0;
 }
 
 void Logs()
 {
-    std::ofstream logs;
+    ofstream logs;
     logs.open("report.txt");
     cout << logs.is_open() << endl;
     logs << "////////////////////////////////////////////////////////////////" << "\n";

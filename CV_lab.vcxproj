@@ -129,7 +129,7 @@
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <AdditionalLibraryDirectories>C:\Opencv\build\x64\vc17\lib\Release;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>opencv_core460.lib;opencv_highgui460.lib;opencv_imgcodecs460.lib;opencv_imgproc460.lib;opencv_video460.lib;opencv_videoio460.lib;opencv_features2d460.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>opencv_core460.lib;opencv_highgui460.lib;opencv_imgcodecs460.lib;opencv_imgproc460.lib;opencv_video460.lib;opencv_videoio460.lib;opencv_features2d460.lib;opencv_calib3d460.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
