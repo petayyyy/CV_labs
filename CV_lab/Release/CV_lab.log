@@ -1,0 +1,2 @@
+﻿  main.cpp
+C:\Users\ilyah\Desktop\MGY\IS_RTK\CV_lab\main.cpp(1,10): error C1083: Cannot open include file: 'opencv2/core/core.hpp': No such file or directory
